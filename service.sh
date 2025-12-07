@@ -13,7 +13,7 @@ mkswap "/dev/block/zram0"
 rm "/dev/block/zram0"
 touch "/dev/block/zram0"
 
-mask_val "171" /proc/sys/vm/swappiness
+mask_val "25" /proc/sys/vm/swappiness
 mask_val "20" /proc/sys/vm/compaction_proactiveness
 mask_val "0" /proc/sys/vm/page-cluster
 mask_val "32768" /proc/sys/vm/min_free_kbytes
