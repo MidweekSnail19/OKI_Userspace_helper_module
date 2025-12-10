@@ -13,7 +13,7 @@ mkswap "/dev/block/zram0"
 rm "/dev/block/zram0"
 touch "/dev/block/zram0"
 
-mask_val "25" /proc/sys/vm/swappiness
+mask_val "1" /proc/sys/vm/swappiness
 mask_val "20" /proc/sys/vm/compaction_proactiveness
 mask_val "0" /proc/sys/vm/page-cluster
 mask_val "32768" /proc/sys/vm/min_free_kbytes
@@ -26,15 +26,18 @@ mask_val "60" /proc/sys/vm/dirtytime_expire_seconds
 lock_val "1000" /sys/kernel/mm/lru_gen/min_ttl_ms
 lock_val "Y" /sys/kernel/mm/lru_gen/enabled
 
-rm $MODDIR/zram_last
 
 
 chmod 755 "$MODDIR/zram_recomp.sh" 2>/dev/null
 . "$MODDIR/zram_recomp.sh"
 
-# 每 10 分钟尝试一次，真正的 30 分钟 backoff 在脚本内部控制
-INTERVAL=600
+# 每 15 分钟尝试一次，真正的 30 分钟 backoff 在脚本内部控制
+INTERVAL=900
 
+while true; do
+    zram_mark_and_recompress
+    sleep "$INTERVAL"
+done
 while true; do
     zram_mark_and_recompress
     sleep "$INTERVAL"
