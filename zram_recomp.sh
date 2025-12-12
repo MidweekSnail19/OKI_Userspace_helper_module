@@ -1,40 +1,81 @@
 #!/system/bin/sh
 #
-# zram_recomp.sh
-# lz4 为主：平时只重压 idle/huge_idle，PSI 高时再动 huge
+# zram_recomp_nostate.sh (no logs, no statefile)
 #
 
-MODDIR=${MODDIR:-${0%/*}}
-LOGFILE="$MODDIR/zram_recomp.log"
-STATEFILE="$MODDIR/zram_last"
+THRESHOLD_BYTES=1024
 
-# 不写日志：所有 log 调用直接空操作
-log() { :; }
+# PSI gating
+PSI_STOP_SOME=0.05
+PSI_STOP_FULL=0.00
 
-# 对应 Params::default()
-BACKOFF_DURATION=1800        # 30 分钟（秒）
-MIN_IDLE=7200                # 2 小时（秒）
-MAX_IDLE=14400               # 4 小时（秒）
-# 正常情况下 idle_age 用中值 3h，高压时可以用更激进的 2h
-IDLE_AGE_NORMAL=$(( (MIN_IDLE + MAX_IDLE) / 2 ))  # 10800 秒 = 3h
-IDLE_AGE_HIGH=$MIN_IDLE                           # 7200 秒 = 2h
-THRESHOLD_BYTES=1024         # 1 KiB
+# 触发门槛：zram 内容变化超过这个才值得重压（你可调 64/128/256MB）
+MIN_DELTA_BYTES=$((128 * 1024 * 1024))
 
-# PSI 设置
-USE_PSI=1
-# memory some avg10 >= 0.20 视为“压力比较高”
-PSI_HIGH_THRESHOLD=0.20
-
-boot_uptime() {
-    awk '{print int($1)}' /proc/uptime 2>/dev/null
-}
+# 冷页窗口
+MIN_IDLE=7200
+MAX_IDLE=14400
+IDLE_AGE_NORMAL=$(( (MIN_IDLE + MAX_IDLE) / 2 ))
 
 zram_ready() {
-    [ -e /sys/block/zram0/idle ] && [ -e /sys/block/zram0/recompress ]
+  [ -e /sys/block/zram0/idle ] && [ -e /sys/block/zram0/recompress ] && [ -r /sys/block/zram0/mm_stat ]
 }
 
-# 读取 memory PSI 的 some avg10（浮点数，例如 0.15）
 get_mem_psi_some_avg10() {
+  [ -r /proc/pressure/memory ] || return 1
+  awk '/^some /{for(i=1;i<=NF;i++)if($i~/^avg10=/){sub("avg10=","",$i);print $i;exit}}' /proc/pressure/memory 2>/dev/null
+}
+get_mem_psi_full_avg10() {
+  [ -r /proc/pressure/memory ] || return 1
+  awk '/^full /{for(i=1;i<=NF;i++)if($i~/^avg10=/){sub("avg10=","",$i);print $i;exit}}' /proc/pressure/memory 2>/dev/null
+}
+
+zram_metric_bytes() {
+  local s
+  s="$(cat /sys/block/zram0/mm_stat 2>/dev/null)" || return 1
+  case "$s" in
+    *"="*)
+      echo "$s" | tr ' ' '\n' | awk -F= '
+        $1=="orig_data_size"{print $2; found=1; exit}
+        $1=="compr_data_size"{print $2; found=1; exit}
+        END{if(!found) print 0}
+      '
+      ;;
+    *)
+      echo "$s" | awk '{print ($3>0)?$3:$1}'
+      ;;
+  esac
+}
+
+zram_mark_and_recompress() {
+  zram_ready || return 1
+
+  # PSI high => stop
+  if [ "${USE_PSI:-0}" -ne 0 ]; then
+    local s f
+    s="$(get_mem_psi_some_avg10)"
+    f="$(get_mem_psi_full_avg10)"
+    [ -n "$f" ] && awk "BEGIN{exit !($f > $PSI_STOP_FULL)}" && return 0
+    [ -n "$s" ] && awk "BEGIN{exit !($s >= $PSI_STOP_SOME)}" && return 0
+  fi
+
+  # 变化不大 => skip（无状态文件：用“上一次运行时的 metric”放在内存变量里）
+  # 注意：这要求该脚本在同一个 shell 进程里常驻（你是 daemon 循环，满足）
+  local m
+  m="$(zram_metric_bytes)"
+  [ -z "$m" ] && return 1
+
+  if [ -n "${_ZRAM_LAST_METRIC:-}" ]; then
+    local d=$(( m - _ZRAM_LAST_METRIC ))
+    [ "$d" -lt 0 ] && d=$(( -d ))
+    [ "$d" -lt "$MIN_DELTA_BYTES" ] && return 0
+  fi
+  _ZRAM_LAST_METRIC="$m"
+
+  echo "$IDLE_AGE_NORMAL" > /sys/block/zram0/idle 2>/dev/null
+  echo "type=idle threshold=${THRESHOLD_BYTES}" > /sys/block/zram0/recompress 2>/dev/null
+  return 0
+}get_mem_psi_some_avg10() {
     [ -r /proc/pressure/memory ] || return 1
 
     awk '/^some / {
