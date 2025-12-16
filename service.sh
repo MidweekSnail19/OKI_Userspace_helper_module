@@ -49,7 +49,15 @@ for sd in /sys/block/*; do
     lock_val "128" "$sd/queue/read_ahead_kb"
     lock_val "128" "$sd/bdi/read_ahead_kb"
 done
+    exec_system "device_config set_sync_disabled_for_tests until_reboot"
+    exec_system "device_config put activity_manager max_cached_processes 65535"
+    exec_system "device_config put activity_manager max_phantom_processes 65535"
+    exec_system "device_config put lmkd_native use_minfree_levels false"
+    exec_system "device_config delete lmkd_native thrashing_limit_critical"
+    exec_system "device_config put activity_manager use_compaction false"
+    exec_system "device_config put activity_manager_native_boot use_freezer false"
 
+    exec_system "settings put global settings_enable_monitor_phantom_procs false"
 # ... 前面是 IO 优化和 swap 挂载 ...
 
 chmod 755 "$MODDIR/zram_recomp.sh" 2>/dev/null
@@ -68,13 +76,4 @@ chmod 755 "$MODDIR/zram_recomp.sh" 2>/dev/null
         zram_mark_and_recompress
         sleep "$INTERVAL"
     done
-) &chmod 755 "$MODDIR/zram_recomp.sh" 2>/dev/null
-. "$MODDIR/zram_recomp.sh"
-
-# 每 15 分钟尝试一次，真正的 30 分钟 backoff 在脚本内部控制
-INTERVAL=900
-
-while true; do
-    zram_mark_and_recompress
-    sleep "$INTERVAL"
-done
+) &
